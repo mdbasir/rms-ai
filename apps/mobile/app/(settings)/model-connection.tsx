@@ -7,11 +7,13 @@ import type {
 import {
   CLOUDFLARE_AI_GATEWAY_PROVIDER_ID,
   cloudflareModelRouting,
+  compatibleApiKeyRequired,
   compatibleConnectionName,
   connectionDisplayName,
   DEFAULT_MODEL_CONTEXT_WINDOW,
   DEFAULT_MODEL_MAX_TOKENS,
   isCloudflareModelProvider,
+  isCommandCodeBaseUrl,
   isOllamaCloudBaseUrl,
   MAX_MODEL_CONTEXT_WINDOW,
   MAX_MODEL_MAX_TOKENS,
@@ -661,7 +663,7 @@ export default function ModelConnection() {
         prominence="secondary"
         style={{ marginTop: 12 }}
       />
-      {!isOllamaCloudBaseUrl(baseUrl) ? (
+      {!isOllamaCloudBaseUrl(baseUrl) && !isCommandCodeBaseUrl(baseUrl) ? (
         <>
           {disclosureRow(t("Setup help"), showEndpointHelp, () =>
             setShowEndpointHelp((visible) => !visible),
@@ -869,12 +871,12 @@ export default function ModelConnection() {
   const compatKeySection =
     isOpenAiCompatible && acceptsKey ? (
       <View style={styles.keySection}>
-        {isOllamaCloudBaseUrl(baseUrl) ? (
+        {compatibleApiKeyRequired(baseUrl) ? (
           <Text style={styles.sectionTitle}>{t("API key")}</Text>
         ) : (
           disclosureRow(t("API key"), showApiKey, () => setShowApiKey((visible) => !visible))
         )}
-        {showApiKey || isOllamaCloudBaseUrl(baseUrl) ? (
+        {showApiKey || compatibleApiKeyRequired(baseUrl) ? (
           <TextInput
             accessibilityLabel={t("API key")}
             autoCapitalize="none"
@@ -886,9 +888,11 @@ export default function ModelConnection() {
             placeholder={
               isOllamaCloudBaseUrl(baseUrl)
                 ? t("Ollama API key")
-                : credential?.hasKey
-                  ? t("Paste a replacement key")
-                  : t("Optional")
+                : compatibleApiKeyRequired(baseUrl)
+                  ? t("API key")
+                  : credential?.hasKey
+                    ? t("Paste a replacement key")
+                    : t("Optional")
             }
             placeholderTextColor={native.tertiaryLabel}
             secureTextEntry
