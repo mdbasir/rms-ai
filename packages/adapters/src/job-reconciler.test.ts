@@ -163,7 +163,7 @@ describe("createJobReconciler", () => {
     });
   });
 
-  it("restores a completed messaging run that was not durably mirrored", async () => {
+  it("restores a completed or paused messaging run that was not durably mirrored", async () => {
     const prisma = fakePrisma();
     vi.mocked(prisma.run.findMany)
       .mockResolvedValueOnce([])
@@ -174,7 +174,11 @@ describe("createJobReconciler", () => {
     await createJobReconciler({ prisma, jobs }).reconcileOnce();
 
     expect(prisma.run.findMany).toHaveBeenCalledWith({
-      where: { trigger: "messaging", status: "completed", messagingMirroredAt: null },
+      where: {
+        trigger: "messaging",
+        status: { in: ["completed", "waiting_input"] },
+        messagingMirroredAt: null,
+      },
       orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
       take: 100,
       select: { id: true },

@@ -26,6 +26,7 @@ import {
   isApprovalAskBlock,
   isConversationalRun,
   isSecretAskBlock,
+  isTextAnswerableAsk,
   messageBypassesTakeoverWait,
   messageReaction,
   messageSteersRun,
@@ -328,6 +329,11 @@ export interface SendUserMessageInput {
   createRun?: boolean;
   /** When true, start a new run even if the bot is already busy (team-chat delivery). */
   allowParallelRun?: boolean;
+  /**
+   * The waiting question this message replies to. While it can still take a typed answer, the
+   * message answers it with `answer` and resumes its run instead of starting one.
+   */
+  answers?: { runId: string; messageId: string; answer: string };
   /** Model every routine in an inbound delivery agreed on. */
   modelPin?: {
     modelProvider: string;
@@ -563,6 +569,16 @@ export async function sendUserMessage(
       }
       const author = await loadMessageAuthor(tx, input.authorUserId);
       const createRun = input.createRun !== false;
+      const answeredRunId =
+        input.answers &&
+        (await answerWaitingRunWithTextInTransaction(tx, {
+          spaceId: input.spaceId,
+          threadId: input.threadId,
+          answeredByUserId: input.userId,
+          ...input.answers,
+        }))
+          ? input.answers.runId
+          : null;
       // Include the creation intro. It has no tools, so it must not absorb the message, and a
       // second run would overlap it on a dedicated computer. Pending steering waits for the
       // continuation that starts when the intro finishes.
@@ -610,7 +626,9 @@ export async function sendUserMessage(
         null;
       let task = null;
       let run = null;
-      if (createRun && !busy) {
+      if (answeredRunId) {
+        await tx.message.update({ where: { id: message.id }, data: { runId: answeredRunId } });
+      } else if (createRun && !busy) {
         task = await tx.task.create({
           data: {
             spaceId: input.spaceId,
@@ -673,7 +691,7 @@ export async function sendUserMessage(
         threadId: input.threadId,
         botId: input.botId,
         type: "thread.message.created",
-        runId: run?.id ?? busy?.id,
+        runId: answeredRunId ?? run?.id ?? busy?.id,
         payload: {
           messageId: message.id,
           role: "user",
@@ -684,7 +702,7 @@ export async function sendUserMessage(
           callId: callIdFromClientNonce(message.clientNonce),
         },
       });
-      return { message, task, run, busy, event };
+      return { message, task, run, busy, answeredRunId, event };
     }, THREAD_LOCK_TRANSACTION_OPTIONS);
   const committed = await commit().catch(async (error) => {
     const winner = await replay();
@@ -705,7 +723,7 @@ export async function sendUserMessage(
     messageId: committed.message.id,
     seq: committed.message.seq,
     taskId: committed.task?.id ?? null,
-    runId: committed.run?.id ?? committed.busy?.id ?? null,
+    runId: committed.answeredRunId ?? committed.run?.id ?? committed.busy?.id ?? null,
   };
 }
 
@@ -891,6 +909,7 @@ async function commitAnswerRunInput(
       checkpoint: true,
       trigger: true,
       clientNonce: true,
+      messagingMirroredAt: true,
       task: { select: { prompt: true } },
     },
   });
@@ -1012,6 +1031,9 @@ async function commitAnswerRunInput(
       status: "queued",
       ...(resumedTrigger !== run.trigger ? { trigger: resumedTrigger } : {}),
       ...(choiceAsk ? { checkpoint: null } : {}),
+      // The chat app got the question when the run paused; its reply after the answer is still
+      // to be mirrored, so receipts wait for it and the reconciler can repair a missed mirror.
+      ...(run.messagingMirroredAt ? { messagingMirroredAt: null } : {}),
     },
   });
   if (queued.count !== 1) return null;
@@ -1310,7 +1332,7 @@ export async function eligibleWaitingTextAnswer(
   if (!answer) return null;
   const found = await findPendingAsk(tx, input);
   if (!found) return null;
-  if (isApprovalAskBlock(found.pendingAsk) || isSecretAskBlock(found.pendingAsk)) return null;
+  if (!isTextAnswerableAsk(found.pendingAsk)) return null;
   if (input.messageId !== undefined) {
     if (input.messageId !== found.messageId) return null;
   } else {
