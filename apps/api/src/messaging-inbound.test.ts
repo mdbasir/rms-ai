@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MessagingInboundDeps } from "./messaging-inbound.js";
 import {
   createMessagingInboundHandler,
+  TEXT_ANSWER_WINDOW_MS,
   teamChatSenderCanWakeMessageRoutines,
   wakeMessageRoutines,
 } from "./messaging-inbound.js";
@@ -424,6 +425,81 @@ describe("createMessagingInboundHandler DM routing", () => {
     });
     expect(deps.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ name: "run.continue", payload: { runId: "run-1" } }),
+    );
+  });
+
+  it("answers the bot's question when it is the newest message the chat was sent", async () => {
+    const deps = createDeps();
+    const question = {
+      kind: "ask",
+      text: "Which city?",
+      status: "pending",
+      actions: [
+        { id: "choice-1", label: "Berlin" },
+        { id: "choice-2", label: "Paris" },
+      ],
+    };
+    const findQuestion = vi.fn(async () => ({ runId: "run-waiting", blocks: [question] }));
+    Object.assign(deps.prisma.message, { findFirst: findQuestion });
+    const start = Date.now() - 60_000;
+    const sent = (sourceMessageId: string | null, status: string, at: number) =>
+      deps.outboundRows.push({
+        idempotencyKey: `row-${at}`,
+        kind: "dm",
+        identityId: "mi-1",
+        sourceMessageId,
+        status,
+        createdAt: new Date(start + at),
+      });
+    sent("ask-1", "sent", 1);
+    const handle = createMessagingInboundHandler(deps);
+
+    await handle({ ...dmEvent, content: "2" });
+    expect(findQuestion).toHaveBeenCalledWith({
+      where: { id: "ask-1", threadId: "thread-1", role: "bot" },
+      select: { runId: true, blocks: true },
+    });
+    expect(deps.sendUserMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        blocks: [{ kind: "text", text: "2" }],
+        answers: { runId: "run-waiting", messageId: "ask-1", answer: "choice-2" },
+      }),
+    );
+
+    // A reply with a file, or one after anything newer the chat was sent, is an ordinary message.
+    await handle({
+      ...dmEvent,
+      handle: "handle-2",
+      content: "Paris",
+      mediaUrl: "https://x.test/a",
+    });
+    expect(deps.sendUserMessage).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ answers: expect.anything() }),
+    );
+    sent(null, "sent", 2);
+    await handle({ ...dmEvent, handle: "handle-3", content: "Paris" });
+    expect(deps.sendUserMessage).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ answers: expect.anything() }),
+    );
+
+    // Nor is a reply to a question that is already answered, or one sent too long ago.
+    sent("ask-1", "sent", 3);
+    question.status = "answered";
+    await handle({ ...dmEvent, handle: "handle-4", content: "Paris" });
+    expect(deps.sendUserMessage).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ answers: expect.anything() }),
+    );
+    question.status = "pending";
+    sent("ask-1", "sent", 4);
+    await handle({ ...dmEvent, handle: "handle-5", content: "Paris" });
+    expect(deps.sendUserMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ answers: expect.objectContaining({ answer: "Paris" }) }),
+    );
+    for (const [index, row] of deps.outboundRows.entries())
+      row.createdAt = new Date(Date.now() - TEXT_ANSWER_WINDOW_MS - 10 + index);
+    await handle({ ...dmEvent, handle: "handle-6", content: "Paris" });
+    expect(deps.sendUserMessage).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ answers: expect.anything() }),
     );
   });
 

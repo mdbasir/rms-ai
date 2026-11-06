@@ -8,7 +8,14 @@ import type {
 } from "@rakazo/adapter-kit";
 import { messagingDeliverJob, runContinueJob } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
-import { botMessageHopExhausted, nextBotMessageHop, pageLinksAsTitles } from "@rakazo/core";
+import {
+  askAsPlainText,
+  botMessageHopExhausted,
+  isTextAnswerableAsk,
+  nextBotMessageHop,
+  pageLinksAsTitles,
+  WORKING_RUN_STATUSES,
+} from "@rakazo/core";
 import type { Prisma, PrismaClient, ThreadEvents } from "@rakazo/db";
 import {
   accountDeactivated,
@@ -95,8 +102,9 @@ export async function mirrorMessagingOutbound(
   runId: string,
 ): Promise<void> {
   await mirrorRun(deps, runId);
+  // A run answered since it paused is working again; its reply is not mirrored yet.
   await deps.prisma.run.updateMany({
-    where: { id: runId, trigger: "messaging" },
+    where: { id: runId, trigger: "messaging", status: { notIn: [...WORKING_RUN_STATUSES] } },
     data: { messagingMirroredAt: new Date() },
   });
 }
@@ -147,7 +155,8 @@ async function mirrorRun(deps: MessagingDeliveryDeps, runId: string): Promise<vo
   // reply, so a concurrent DM mirror cannot interleave its parts.
   const linkedPages = linkedPageIds(messages);
   const rows = messages.flatMap((message) => {
-    const body = extractText(message.blocks, linkedPages);
+    // A pending question goes as text, so a reply in the chat can answer it.
+    const body = extractText(message.blocks, linkedPages, { asks: true });
     const parts = body ? splitOutboundBody(identity.provider, body) : [];
     return [
       ...parts.map((part, index) => ({
@@ -870,15 +879,25 @@ function linkedPageIds(messages: readonly { blocks: unknown }[]): Set<string> {
 
 /**
  * The text other channels get. A page card cannot travel, so a page the reply does not name goes
- * as its title.
+ * as its title. With `asks`, a pending question a reply can answer goes as text too.
  */
-function extractText(blocks: unknown, linkedPages: ReadonlySet<string>): string {
+function extractText(
+  blocks: unknown,
+  linkedPages: ReadonlySet<string>,
+  options: { asks?: boolean } = {},
+): string {
   if (!Array.isArray(blocks)) return "";
   return blocks
     .flatMap(
       (block: { kind?: unknown; text?: unknown; pageId?: unknown; title?: unknown } | null) => {
         if (block?.kind === "text" && typeof block.text === "string")
           return [pageLinksAsTitles(block.text)];
+        if (options.asks && block?.kind === "ask" && typeof block.text === "string") {
+          const ask = block as Extract<MessageBlock, { kind: "ask" }>;
+          return ask.status !== "answered" && isTextAnswerableAsk(ask)
+            ? [pageLinksAsTitles(askAsPlainText(ask))]
+            : [];
+        }
         if (
           block?.kind === "page" &&
           typeof block.title === "string" &&

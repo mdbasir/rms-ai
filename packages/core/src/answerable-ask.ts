@@ -1,4 +1,4 @@
-import { isSecretAskBlock } from "./action-approval.js";
+import { isApprovalAskBlock, isSecretAskBlock } from "./action-approval.js";
 
 type AskSnapshot = {
   messages: readonly {
@@ -70,4 +70,38 @@ export function resolveAskChoice(
   if (byId) return byId;
   const lower = trimmed.toLowerCase();
   return actions.find((action) => action.label.trim().toLowerCase() === lower);
+}
+
+/** A question a typed reply can answer: approvals and secret requests need their card. */
+export function isTextAnswerableAsk(block: {
+  kind: string;
+  input?: string;
+  approvalEffectId?: string;
+  actions?: Array<{ id: string; label: string }>;
+}): boolean {
+  return block.kind === "ask" && !isApprovalAskBlock(block) && !isSecretAskBlock(block);
+}
+
+/** A question as plain text for chats without cards, its options numbered so a reply can pick one. */
+export function askAsPlainText(block: {
+  text: string;
+  detail?: string;
+  actions?: readonly { id: string; label: string }[];
+}): string {
+  const options = (block.actions ?? []).map((action, index) => `${index + 1}. ${action.label}`);
+  return [block.text.trim(), block.detail?.trim(), options.join("\n")].filter(Boolean).join("\n\n");
+}
+
+/**
+ * The answer a plain-text reply gives a question sent by askAsPlainText: a bare number within the
+ * list picks the option listed under it, even when an option's label is a number. Anything else,
+ * an out-of-range number included, is passed on as written, so the usual label matching applies.
+ */
+export function plainTextAskAnswer(
+  reply: string,
+  actions?: readonly { id: string; label: string }[],
+): string {
+  const trimmed = reply.trim();
+  if (!/^\d+$/.test(trimmed)) return trimmed;
+  return actions?.[Number(trimmed) - 1]?.id ?? trimmed;
 }
