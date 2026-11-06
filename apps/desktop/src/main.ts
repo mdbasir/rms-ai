@@ -101,6 +101,7 @@ import {
   sessionPartitionForServerUrl,
 } from "./setup-config.js";
 import { clearSetup, readSetup, readUiLocale, writeSetup, writeUiLocale } from "./setup-store.js";
+import { StackStopMenuAvailability, stopLocalStackItem } from "./stop-local-stack.js";
 import { createSystemSpeech } from "./system-speech.js";
 import type { UserDeviceAccess } from "./user-device.js";
 import { createUserDeviceAccess, deviceName } from "./user-device.js";
@@ -778,18 +779,15 @@ function installApplicationMenu() {
     accelerator: "CmdOrCtrl+Shift+K",
     click: () => showSetupWindow(),
   };
-  const stopStack: Electron.MenuItemConstructorOptions = {
-    id: "stop-local-stack",
-    label: t("Stop Local Stack"),
-    // The stack keeps running after quit (bots are always on); this is the explicit off switch.
-    click: () => {
-      if (currentSetup?.mode === "new") {
-        hostComputer?.activate(false);
-        installApplicationMenu();
-        void localStack.stop();
-      }
+  const stopStack = stopLocalStackItem({
+    mode: currentSetup?.mode,
+    stackRunning: localStack.managedStackRunning(),
+    stop: () => {
+      hostComputer?.activate(false);
+      return localStack.stop();
     },
-  };
+    rebuildMenu: () => installApplicationMenu(),
+  });
   const isMac = process.platform === "darwin";
   // The page handles these chords itself and stops them, so a key press runs them once; the menu
   // shows them and runs them on click. The page decides whether each one applies right now.
@@ -1423,6 +1421,8 @@ app.whenReady().then(async () => {
         ...events,
       }),
   });
+  // Must exist before the stack controller: its lifecycle transitions refresh the stop item.
+  const stopStackMenu = new StackStopMenuAvailability(() => installApplicationMenu());
   localStack = new LocalStackController({
     hostComputer: hostComputer?.connection,
     platform: process.platform,
@@ -1449,7 +1449,12 @@ app.whenReady().then(async () => {
       if (setupWindow !== null && !setupWindow.isDestroyed()) {
         setupWindow.webContents.send("desktop.setup.stack.changed", state);
       }
+      // A stack can start or stop without a server switch; its phase transitions refresh
+      // the stop item.
+      stopStackMenu.stackChanged(state.phase);
     },
+    // A confirmed reuse changes no phase; the menu must hear about it separately.
+    onReuseConfirmed: () => stopStackMenu.reuseConfirmed(),
   });
   currentSetup = await readSetup(userDataDir);
   const target = resolveStartupTarget({
@@ -1818,6 +1823,11 @@ app.whenReady().then(async () => {
         showSetupWindow();
       }
     } else {
+      // The saved server is external, but the app-managed stack may still be running from
+      // before the switch — possibly on an older release, which must not be reused but
+      // still needs the off-switch. Probe only: with no stack files this returns before
+      // any request, and nothing starts or stops.
+      void localStack.rediscoverManagedStack();
       const reachability = await probeServer(target.url, undefined, currentSetup?.headers);
       if (reachability.ok) {
         if (await appOpener.open(target.url)) {
