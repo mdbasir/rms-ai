@@ -96,6 +96,7 @@ import {
   useOwnSpaces,
 } from "../components/integrations/space-availability";
 import { connectedAppMarks } from "../lib/connected-apps";
+import { connectMcpEndpoint } from "../lib/mcp-connect";
 import { optionalCatalogFeedProbe } from "../lib/optional-catalog-feed";
 import { useSpaceQueries } from "../lib/query";
 import { rpc } from "../lib/rpc";
@@ -674,18 +675,37 @@ export function PluginsOverlay({
     }
   }
 
+  async function signInCatalogSurface(name: string, endpoint: string) {
+    setCatalogFeedError(null);
+    setPending(`catalog:${endpoint}`);
+    try {
+      const result = await connectMcpEndpoint({ name, endpoint, botId: activeBotId });
+      if (result !== "cancelled") setView("manage");
+    } catch (err) {
+      setCatalogFeedError(errorText(err, t`Could not connect`));
+    } finally {
+      // The server is added whether or not sign-in finishes, and a failure can leave it needing a client.
+      await refresh().catch(() => undefined);
+      setPending(null);
+    }
+  }
+
   function beginCatalogSurface(
     result: IntegrationCatalogResult,
     surface: IntegrationCatalogSurface,
   ) {
     if (!surface.source || (surface.kind !== "mcp" && surface.kind !== "openapi")) return;
+    if (surface.kind === "mcp" && surface.auth?.type === "oauth") {
+      void signInCatalogSurface(result.name, surface.source);
+      return;
+    }
     setSourceBack("domain");
     setView("source");
     setSourceKind(surface.kind === "mcp" ? "mcp" : "api");
     setSourceName(result.name);
     setSourceUrl(surface.source);
     setCredential("");
-    setAuthType(surface.auth?.type ?? "none");
+    setAuthType(surface.auth?.type === "oauth" ? "bearer" : (surface.auth?.type ?? "none"));
     setAuthName(surface.auth?.headerName ?? "x-api-key");
     setSourceHint(surface.auth?.note ?? null);
     setSourceError(null);
@@ -1412,7 +1432,7 @@ export function PluginsOverlay({
                       type="button"
                       variant="secondary"
                       size="sm"
-                      disabled={!canAdd}
+                      disabled={!canAdd || Boolean(pending)}
                       title={canAdd ? undefined : t`Manual setup required`}
                       onClick={() => beginCatalogSurface(result, surface)}
                     >

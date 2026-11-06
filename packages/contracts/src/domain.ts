@@ -1109,7 +1109,7 @@ export const IntegrationCatalogSurfaceSchema = z.object({
   source: z.string().nullable(),
   auth: z
     .object({
-      type: z.enum(["none", "bearer", "header"]),
+      type: z.enum(["none", "bearer", "header", "oauth"]),
       headerName: z.string().nullable(),
       note: z.string().nullable(),
     })

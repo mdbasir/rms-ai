@@ -1,3 +1,4 @@
+import { findOrAddMcpServer } from "@rakazo/core";
 import { MCP_OAUTH_CHANNEL } from "./mcp-oauth-channel";
 import { rpc } from "./rpc";
 
@@ -62,4 +63,20 @@ export async function connectMcpOauth(serverId: string): Promise<McpOauthResult>
       finish("connected");
     };
   });
+}
+
+/** Adds a remote MCP server by URL, reusing one already added, and signs in to it. */
+export async function connectMcpEndpoint(input: {
+  name: string;
+  endpoint: string;
+  botId?: string;
+}): Promise<McpOauthResult> {
+  const server = await findOrAddMcpServer(input, {
+    list: () => rpc.mcp.servers.list(),
+    create: (config) => rpc.mcp.servers.create(config),
+  });
+  const result = await connectMcpOauth(server.id);
+  if (result !== "cancelled" && input.botId)
+    await rpc.mcp.assignments.approve({ botId: input.botId, serverId: server.id });
+  return result;
 }
