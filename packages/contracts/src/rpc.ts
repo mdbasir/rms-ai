@@ -166,7 +166,7 @@ import {
   VoiceInfoSchema,
   VoiceStatusSchema,
 } from "./domain.js";
-import { ComputerCommandSchema, ProductEventSchema } from "./events.js";
+import { ComputerCommandSchema, ProductEventSchema, ToolCallRecordSchema } from "./events.js";
 import { Id, IsoDate, ThinkingLevelSchema } from "./ids.js";
 import {
   IntegrationProviderConfigSchema,
@@ -744,6 +744,10 @@ export const appContract = {
       )
       .output(z.object({ ok: z.literal(true) })),
     clear: oc.input(threadTarget).output(z.object({ ok: z.literal(true) })),
+    /** What each tool call of a run returned, for the activity view's expanded rows. */
+    toolCalls: oc
+      .input(z.object({ threadId: Id, runId: Id }))
+      .output(z.array(ToolCallRecordSchema)),
     answer: oc
       .input(
         threadTarget

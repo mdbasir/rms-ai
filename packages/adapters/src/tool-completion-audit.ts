@@ -1,11 +1,17 @@
 import type { AgentToolCompletion } from "@rakazo/adapter-kit";
+import { TOOL_RESULT_PREVIEW_MAX_CHARS } from "@rakazo/contracts";
 import { redactSecrets } from "@rakazo/core";
 import type { ThreadEvents } from "@rakazo/db";
 import { RunHistoryWriteError } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { isToolPauseResult } from "./approval-effect.js";
 import { sanitizeConnectorError } from "./connector-safety.js";
-import { isFailedToolResult, toolResultError } from "./tool-result-error.js";
+import {
+  boundToolActivityText,
+  redactToolActivityJson,
+  redactToolActivityText,
+} from "./tool-activity-redaction.js";
+import { isFailedToolResult, toolCallFailed, toolResultError } from "./tool-result-error.js";
 
 function isAuditableToolResult(value: unknown): value is {
   kind: "agent_tool_result";
@@ -42,11 +48,18 @@ export function toolCompletionAuditPayload(
     name: redactSecrets(completion.name, secrets),
     executionId: redactSecrets(completion.executionId, secrets),
     durationMs,
-    outcome: completion.paused ? "paused" : error === undefined ? "succeeded" : "error",
+    // The same verdict the step shows, so the live mark never changes once the reply lands.
+    outcome: completion.paused
+      ? "paused"
+      : toolCallFailed(completion.error, completion.result)
+        ? "error"
+        : "succeeded",
   };
   if (error !== undefined) {
     payload.error = sanitizeConnectorError(error, secrets);
   }
+  const preview = toolResultPreview(completion.result, secrets);
+  if (preview) payload.preview = preview;
   if (!isAuditableToolResult(completion.result)) return payload;
 
   payload.contentTypes = completion.result.content.flatMap((part) => {
@@ -72,6 +85,44 @@ export function toolCompletionAuditPayload(
     payload.height = record.height;
   }
   return payload;
+}
+
+/**
+ * What the tool returned, bounded and with secrets taken out, for the activity view: its text
+ * parts, a plain string, or a plain object (a scripted file action's path and size) as JSON.
+ */
+function toolResultPreview(result: unknown, secrets: string[]): string | undefined {
+  // A structured result is redacted as it stands; text is checked for JSON first.
+  if (
+    result &&
+    typeof result === "object" &&
+    !Array.isArray((result as { content?: unknown }).content)
+  ) {
+    if (Object.keys(result).length === 0) return undefined;
+    return boundToolActivityText(
+      redactToolActivityJson(result, secrets),
+      TOOL_RESULT_PREVIEW_MAX_CHARS,
+    );
+  }
+  const content = (result as { content?: unknown } | undefined)?.content;
+  const text = (
+    typeof result === "string"
+      ? result
+      : Array.isArray(content)
+        ? content
+            .flatMap((part) =>
+              part && typeof part === "object" && (part as { type?: unknown }).type === "text"
+                ? [String((part as { text?: unknown }).text ?? "")]
+                : [],
+            )
+            .join("\n")
+        : ""
+  ).trim();
+  if (!text) return undefined;
+  return boundToolActivityText(
+    redactToolActivityText(text, secrets),
+    TOOL_RESULT_PREVIEW_MAX_CHARS,
+  );
 }
 
 export async function appendToolCompletionAudit(

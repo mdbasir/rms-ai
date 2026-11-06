@@ -10,7 +10,9 @@ import {
   SandboxRateLimitError,
   TransientModelError,
 } from "@rakazo/adapter-kit";
+import { TOOL_RESULT_PREVIEW_MAX_CHARS } from "@rakazo/contracts";
 import {
+  boundToolStepDetail,
   containsSecret,
   displayName,
   humanizeToolName,
@@ -19,6 +21,7 @@ import {
   redactSecrets,
   redactSecretsAfter,
   TAKEOVER_COMPUTER_PENDING_STATE,
+  toolCallDetailLine,
   userRunError,
   withoutLastToolStepNotes,
 } from "@rakazo/core";
@@ -28,6 +31,7 @@ import { sanitizedError } from "@rakazo/logging/monitoring";
 import { MAX_APPROVAL_DETAIL_LENGTH, truncate } from "./approval-ask.js";
 import { isToolPauseResult } from "./approval-effect.js";
 import { returnBotMessageOutcome } from "./bot-messages.js";
+import { USE_TOOL } from "./builtin-tool-bridge.js";
 import { scheduleComputerSleep } from "./computer-idle.js";
 import { holdComputerExecutionLeaseForTakeover } from "./computer-lifecycle.js";
 import { resolveBotWorkspacePath } from "./computer-support.js";
@@ -65,7 +69,9 @@ import {
   publishMidTurnNarration,
   publishNarrationBeforeAsk,
   recordExplicitNoResponse,
+  recordToolOutcome,
   showNarrationStatus,
+  toolCallResultFields,
   tryFlushPendingTools,
 } from "./run-progress.js";
 import {
@@ -87,6 +93,11 @@ import {
 } from "./silent-reply.js";
 import { isStrategicInitiativeRun } from "./strategic-initiative.js";
 import { takeoverCheckpointOf } from "./takeover-resume.js";
+import {
+  boundToolActivityText,
+  redactToolActivityLine,
+  redactToolActivityValue,
+} from "./tool-activity-redaction.js";
 import { appendToolCompletionAudit, toolCompletionFromResult } from "./tool-completion-audit.js";
 import {
   advanceOverLimitActionCalls,
@@ -96,6 +107,7 @@ import {
   overLimitStopText,
   toolResultFingerprint,
 } from "./tool-loop.js";
+import { toolCallFailed } from "./tool-result-error.js";
 import {
   assistantTurnSeparator,
   botMessageOutcomeFromMidTurn,
@@ -512,7 +524,21 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
   await flushProgress(ctx);
   // Queued first so the text written before this call becomes its note.
   const stepNames = connectorStepNames(ctx.tools.connector.get(event.name), event.args);
-  reply.pendingToolNames.push(...(stepNames.length > 0 ? stepNames : [event.name]));
+  // Redacted once, value by value, before any of it is shown or serialized.
+  const safeArgs = redactToolActivityValue(toolCallArgs(event), ctx.secrets);
+  const detail = toolStepDetail(safeArgs, ctx.secrets);
+  const input = toolCallInput(event.name, safeArgs, ctx.secrets);
+  // A fast call can finish while the narration above flushes; its result is waiting here.
+  const early = reply.earlyToolOutcomes.get(event.executionId) ?? {};
+  reply.earlyToolOutcomes.delete(event.executionId);
+  reply.pendingTools.push(
+    ...(stepNames.length > 0 ? stepNames : [event.name]).map((name) => ({
+      name,
+      executionId: event.executionId,
+      ...(detail === undefined ? {} : { detail }),
+      ...early,
+    })),
+  );
   // Text before ask_user stays pending: the run pauses next, and the question needs it.
   const heldNote =
     event.name === "message_user" || event.name === "ask_user"
@@ -529,7 +555,14 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
     botId: bot.id,
     type: "agent.tool.called",
     runId,
-    payload: { name: event.name, executionId: event.executionId },
+    payload: {
+      name: event.name,
+      executionId: event.executionId,
+      ...(detail === undefined ? {} : { detail }),
+      ...(input === undefined ? {} : { input }),
+      // Read now, not above: the call may also have finished while the narration published.
+      ...toolCallResultFields(reply, event.executionId),
+    },
   });
   await showNarrationStatus(ctx, heldNote);
   tryFlushPendingTools(reply);
@@ -566,34 +599,69 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
   try {
     const result = await applyTool(ctx, event.name, event.args, event.executionId);
     toolResults.set(event.executionId, toolResultFingerprint(result));
-    await appendToolCompletionAudit(
-      deps,
-      audit,
-      toolCompletionFromResult(
-        {
-          name: event.name,
-          executionId: event.executionId,
-          durationMs: Date.now() - startedAt,
-        },
-        result,
-      ),
-      ctx.secrets,
+    const completion = toolCompletionFromResult(
+      { name: event.name, executionId: event.executionId, durationMs: Date.now() - startedAt },
+      result,
     );
+    if (!completion.paused) {
+      recordToolOutcome(
+        reply,
+        event.executionId,
+        toolCallFailed(completion.error, result) ? "error" : "ok",
+        completion.durationMs,
+      );
+    }
+    await appendToolCompletionAudit(deps, audit, completion, ctx.secrets);
     return isToolPauseResult(result);
   } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    recordToolOutcome(reply, event.executionId, "error", durationMs);
     await appendToolCompletionAudit(
       deps,
       audit,
-      {
-        name: event.name,
-        executionId: event.executionId,
-        durationMs: Date.now() - startedAt,
-        error,
-      },
+      { name: event.name, executionId: event.executionId, durationMs, error },
       ctx.secrets,
     );
     throw error;
   }
+}
+
+/** The arguments the call is about: a deferred tool's own, when reached through use_tool. */
+function toolCallArgs(event: RuntimeEvent<"tool">): unknown {
+  const inner = event.name === USE_TOOL ? event.args.arguments : undefined;
+  return inner && typeof inner === "object" ? inner : event.args;
+}
+
+/**
+ * What the call is about, safe to show: its arguments' main line, from arguments already
+ * redacted, cut to length only afterwards so a secret is never split and a replacement never
+ * overruns.
+ */
+function toolStepDetail(safeArgs: unknown, secrets: readonly string[]): string | undefined {
+  const line = toolCallDetailLine(safeArgs);
+  // Passed once more whole: a run secret can span values the line joins.
+  return line === undefined
+    ? undefined
+    : boundToolStepDetail(redactToolActivityLine(line, secrets));
+}
+
+/**
+ * The call's arguments for the activity view, as bounded JSON of arguments already redacted
+ * value by value, passed once more whole: a run secret can span values the JSON joins. A shell
+ * command's text already streams with its output, so it carries none.
+ */
+function toolCallInput(
+  name: string,
+  safeArgs: unknown,
+  secrets: readonly string[],
+): string | undefined {
+  if (name === "shell" || name === "user_computer_shell") return undefined;
+  if (!safeArgs || typeof safeArgs !== "object" || Object.keys(safeArgs).length === 0)
+    return undefined;
+  return boundToolActivityText(
+    redactToolActivityLine(JSON.stringify(safeArgs, null, 2), secrets),
+    TOOL_RESULT_PREVIEW_MAX_CHARS,
+  );
 }
 
 /** The model keeps repeating the same call: finish the run with what it has and say why. */
