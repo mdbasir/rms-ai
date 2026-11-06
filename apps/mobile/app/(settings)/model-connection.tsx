@@ -2,6 +2,7 @@ import type {
   ModelApiProtocol,
   ModelHeaderRow,
   ModelOAuthBegin,
+  OpenAiCompatibleModelInfo,
   ThinkingLevel,
 } from "@rakazo/contracts";
 import {
@@ -29,6 +30,7 @@ import {
   createModelProbe,
   initialModelProbeState,
   modelConnectRequest,
+  pickedCompatibleModelFields,
   savedCompatibleModelIds,
   toggleEnabledModelId,
 } from "@rakazo/core";
@@ -119,9 +121,14 @@ export default function ModelConnection() {
   const [showEndpointHelp, setShowEndpointHelp] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
+  // What the server's listing says about each found model; picking one prefills the switches.
+  const [probeDetails, setProbeDetails] = useState<OpenAiCompatibleModelInfo[]>([]);
   const [{ models: probeModels, probing }, setProbe] = useState(initialModelProbeState);
   const [modelProbe] = useState(() => createModelProbe(setProbe));
-  const resetOpenAiCompatibleProbe = modelProbe.reset;
+  const resetOpenAiCompatibleProbe = useCallback(() => {
+    modelProbe.reset();
+    setProbeDetails([]);
+  }, [modelProbe]);
   const [oauth, setOauth] = useState<ModelOAuthBegin | null>(null);
   const [pasteCode, setPasteCode] = useState("");
   const [loading, setLoading] = useState(true);
@@ -237,7 +244,7 @@ export default function ModelConnection() {
       setGatewayId(fields.gatewayId);
       return nextMe;
     },
-    [request, rpc, t],
+    [request, resetOpenAiCompatibleProbe, rpc, t],
   );
 
   useFocusEffect(
@@ -321,6 +328,8 @@ export default function ModelConnection() {
       savedCompatibleEndpointMatches(nextBaseUrl, credential?.baseUrl)
         ? (credential?.modelId ?? "")
         : "",
+      [],
+      nextBaseUrl,
     );
     resetOpenAiCompatibleProbe();
     clearFeedback();
@@ -348,11 +357,15 @@ export default function ModelConnection() {
     if (!baseUrl.trim()) return;
     Keyboard.dismiss();
     clearFeedback();
+    // The probe keeps only the model ids; hold the rest for the success callback, which a
+    // superseded probe never reaches. A search that fails leaves no details behind.
+    setProbeDetails([]);
+    let found: OpenAiCompatibleModelInfo[] = [];
     await modelProbe.probe({
       baseUrl,
       apiKey,
-      request: (input) =>
-        rpc(
+      request: async (input) => {
+        const result = await rpc(
           "models/probeOpenAiCompatible",
           {
             ...input,
@@ -361,10 +374,14 @@ export default function ModelConnection() {
             credentialId: credential?.id,
           },
           { timeoutMs: MODEL_CONNECT_TIMEOUT_MS },
-        ),
+        );
+        found = result.details ?? [];
+        return result;
+      },
       onSuccess: (models) => {
+        setProbeDetails(found);
         const next = modelId.trim() || models[0] || "";
-        if (next !== modelId) stageCompatibleModelId(next);
+        if (next !== modelId) stageCompatibleModelId(next, found);
         else setModelId(next);
         publishFeedback("probe", {
           notice:
@@ -402,14 +419,21 @@ export default function ModelConnection() {
     }
   }
 
-  function stageCompatibleModelId(nextModelId: string) {
+  function stageCompatibleModelId(nextModelId: string, details = probeDetails, endpoint = baseUrl) {
     setModelId(nextModelId);
-    setThinkingLevel(
-      clampCatalogThinkingLevel(
-        credential?.modelId === nextModelId ? credential.thinkingLevel : null,
-        reasoning ? compatibleThinkingLevels(apiProtocol) : [],
-      ) as ThinkingLevel | null,
-    );
+    const fields = pickedCompatibleModelFields({
+      credential,
+      baseUrl: endpoint,
+      modelId: nextModelId,
+      probed: details.find((info) => info.id === nextModelId),
+      form: { reasoning, maxTokens, apiProtocol },
+    });
+    if (fields.reasoning !== undefined) setReasoning(fields.reasoning);
+    if (fields.supportsImages !== undefined) setSupportsImages(fields.supportsImages);
+    if (fields.maxImagesPerPrompt !== undefined) setMaxImagesPerPrompt(fields.maxImagesPerPrompt);
+    if (fields.maxTokens !== undefined) setMaxTokens(fields.maxTokens);
+    if (fields.contextWindow !== undefined) setContextWindow(fields.contextWindow);
+    setThinkingLevel(fields.thinkingLevel);
   }
 
   async function connectKey(limitsOnly = false) {
@@ -437,6 +461,7 @@ export default function ModelConnection() {
       credentialId: credentialIdRef.current,
       settingsOnly: limitsOnly,
       makeDefault: { makeDefault, scope: target.scope },
+      probedModels: new Map(probeDetails.map((info) => [info.id, info])),
     });
     if (connect.status === "incomplete") return;
     // Drop the previous result before the limit check so it cannot sit beside the new one.
@@ -452,9 +477,11 @@ export default function ModelConnection() {
               })
             : connect.field === "maxImagesPerPrompt"
               ? t("Enter a whole number from 1 to 1000 for the image limit.")
-              : t("Enter a whole number from 1 to {max} for the context limit.", {
-                  max: MAX_MODEL_CONTEXT_WINDOW,
-                }),
+              : connect.field === "maxTokensExceedsContext"
+                ? t("Maximum output tokens must be lower than the context limit.")
+                : t("Enter a whole number from 1 to {max} for the context limit.", {
+                    max: MAX_MODEL_CONTEXT_WINDOW,
+                  }),
       });
       return;
     }

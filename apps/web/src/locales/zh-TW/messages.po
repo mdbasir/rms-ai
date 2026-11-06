@@ -3817,6 +3817,10 @@ msgstr "此模型尚未設定圖片輸入。"
 msgid "Image upload area"
 msgstr "圖片上傳區域"
 
+#: src/lib/model-capability-hint.ts
+msgid "Images"
+msgstr "圖片"
+
 #: src/components/AccountDataSettings.tsx
 msgid "Import"
 msgstr "匯入"
@@ -4295,6 +4299,10 @@ msgstr "每次請求的最大影像數"
 #: src/pages/Onboarding.tsx
 msgid "Maximum output tokens"
 msgstr "最大輸出 token 數"
+
+#: src/pages/model-settings/use-model-settings.ts
+msgid "Maximum output tokens must be lower than the context limit."
+msgstr "最大輸出 token 數必須小於上下文限制。"
 
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 msgid "MCP endpoint"
@@ -6900,6 +6908,7 @@ msgid "They get {weeks} weeks free."
 msgstr "對方可免費使用 {weeks} 週。"
 
 #: src/components/call/CallCard.tsx
+#: src/lib/model-capability-hint.ts
 #: src/pages/ModelRoleSettings.tsx
 #: src/pages/RoutineEditor.tsx
 #: src/pages/shell/bot-panel.tsx

@@ -47,6 +47,7 @@ import { SignupSurvey } from "../components/SignupSurvey";
 import { useCopyText } from "../lib/copy-text";
 import { providerDisplayName } from "../lib/localized-provider-hint";
 import type { ModelCatalogEntry } from "../lib/model-auth";
+import { modelCapabilityHint } from "../lib/model-capability-hint";
 import { rpc } from "../lib/rpc";
 import { useSignOut } from "../lib/sign-out";
 import { useModelOAuthSignIn } from "../lib/use-model-oauth-signin";
@@ -151,6 +152,7 @@ export function OnboardingPage() {
     accountId,
     apiKey,
     apiProtocol,
+    applyProbedModelFields,
     baseUrl,
     routingReady,
     contextWindow,
@@ -172,6 +174,8 @@ export function OnboardingPage() {
     preflightSuccess,
     preflightTarget,
     preflightTesting,
+    probeInfoById,
+    probeInfoRef,
     probeModels,
     probeServerModels,
     probing,
@@ -395,6 +399,8 @@ export function OnboardingPage() {
           );
           return;
         }
+        // Prompt-caching support the model listing published rides along with the connection.
+        const cached = probeInfoRef.current.get(modelId.trim());
         await rpc.models.connect({
           provider,
           baseUrl: baseUrl.trim(),
@@ -407,6 +413,9 @@ export function OnboardingPage() {
           contextWindow: parsedContextWindow,
           supportsImages,
           maxImagesPerPrompt: maxImagesPerPromptInput,
+          ...(cached
+            ? { cacheCapabilitiesByModel: { [modelId.trim()]: cached.cacheCapabilities ?? null } }
+            : {}),
           apiKey: apiKey.trim() || undefined,
           label: selected?.providerName ?? provider,
         });
@@ -582,8 +591,10 @@ export function OnboardingPage() {
                             invalidatePreflight();
                             setManualModelId(next === CUSTOM_MODEL_OPTION);
                             setModelId(next === CUSTOM_MODEL_OPTION ? "" : next);
+                            if (next !== CUSTOM_MODEL_OPTION) applyProbedModelFields(next);
                           }}
                           otherValue={CUSTOM_MODEL_OPTION}
+                          hint={(id) => modelCapabilityHint(probeInfoById.get(id))}
                         />
                       ) : (
                         <Input
@@ -606,6 +617,7 @@ export function OnboardingPage() {
                           onClick={() => {
                             setManualModelId(false);
                             setModelId(probeModels[0] ?? "");
+                            applyProbedModelFields(probeModels[0] ?? "");
                             invalidatePreflight();
                           }}
                         >
