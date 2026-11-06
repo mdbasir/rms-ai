@@ -11,17 +11,18 @@ import {
   prepareGraphqlInstall,
   previewPluginInstall,
   recordMcpServerHealth,
-  sanitizeComposioError,
+  sanitizeIntegrationError,
   verifyMcpInstall,
 } from "@rakazo/adapters";
 import type { Actor } from "@rakazo/contracts";
-import { signupSurveyAsksTeamSize } from "@rakazo/contracts";
+import { MCP_OAUTH_REDIRECT_MISMATCH, signupSurveyAsksTeamSize } from "@rakazo/contracts";
 import { comparePlugins, containsSecret, matchesPluginQuery } from "@rakazo/core";
 import type { Prisma } from "@rakazo/db";
 import {
   AVAILABILITY_SELECT,
   availableInSpace,
   IsolationError,
+  isUniqueViolation,
   itemSecretIn,
   spaceAvailability,
 } from "@rakazo/db";
@@ -64,7 +65,7 @@ import {
   reviewPluginSubmission,
 } from "../plugin-submissions.js";
 import type { RouterContext } from "./context.js";
-import { computerContext, isUniqueViolation } from "./shared.js";
+import { computerContext } from "./shared.js";
 
 export function mcpRoutes(ctx: RouterContext) {
   const {
@@ -221,10 +222,6 @@ export function mcpRoutes(ctx: RouterContext) {
         }
         try {
           if (input.kind === "mcp") {
-            if (config.preset === "treg") {
-              source = "https://treg.to/mcp/";
-              config = { ...config, preset: "treg", auth: { type: "bearer" } };
-            }
             const verified = await verifyMcpInstall({
               source,
               config,
@@ -260,7 +257,7 @@ export function mcpRoutes(ctx: RouterContext) {
             config = prepared.config;
           }
         } catch (error) {
-          const message = sanitizeComposioError(error);
+          const message = sanitizeIntegrationError(error);
           throw new ORPCError("BAD_REQUEST", {
             message: credential ? message.split(credential).join("[redacted]") : message,
           });
@@ -616,15 +613,19 @@ export function mcpRoutes(ctx: RouterContext) {
           if (!server) throw new IsolationError();
           const oauth = await mcpOAuth.summaryFor(server, context.actor);
           if (!deps.mcp) {
-            await recordMcpServerHealth(deps.prisma, server.id, {
-              status: "error",
-              message: "This server cannot be checked from here.",
-            });
+            await recordMcpServerHealth(
+              deps.prisma,
+              server.id,
+              { status: "error", message: "This server cannot be checked from here." },
+              server.revision,
+            );
           } else if (await mcpAwaitsOAuth(server, context.actor, oauth)) {
-            await recordMcpServerHealth(deps.prisma, server.id, {
-              status: "unknown",
-              message: MCP_OAUTH_PENDING_MESSAGE,
-            });
+            await recordMcpServerHealth(
+              deps.prisma,
+              server.id,
+              { status: "unknown", message: MCP_OAUTH_PENDING_MESSAGE },
+              server.revision,
+            );
           } else {
             await probeMcpServer(server, context.actor);
           }
@@ -712,6 +713,7 @@ export function mcpRoutes(ctx: RouterContext) {
           return { ok: true as const };
         }),
       },
+      // Any bot in the space can use the member's own servers; servers and assignments stay personal.
       assignments: {
         all: authed.mcp.assignments.all.handler(async ({ context }) => {
           const rows = await deps.prisma.botMcpServer.findMany({
@@ -730,7 +732,6 @@ export function mcpRoutes(ctx: RouterContext) {
             where: {
               id: input.botId,
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
             },
             select: { id: true },
           });
@@ -763,7 +764,6 @@ export function mcpRoutes(ctx: RouterContext) {
                   where: {
                     id: input.botId,
                     spaceId: context.actor.spaceId,
-                    userId: context.actor.userId,
                   },
                   select: { id: true },
                 }),
@@ -827,7 +827,6 @@ export function mcpRoutes(ctx: RouterContext) {
               where: {
                 id: input.botId,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
               },
               select: { id: true },
             });
@@ -902,7 +901,10 @@ export function mcpRoutes(ctx: RouterContext) {
             const expectedRedirect = new URL("/mcp/oauth/callback", deps.env.webOrigin).toString();
             // Native clients omit the redirect; the registered web callback is always used.
             if (input.redirectUri && new URL(input.redirectUri).toString() !== expectedRedirect) {
-              throw new Error("MCP OAuth redirect URI is not allowed");
+              throw new ORPCError(MCP_OAUTH_REDIRECT_MISMATCH, {
+                status: 400,
+                message: "The sign-in address does not match this server's configuration.",
+              });
             }
             return await mcpOAuth.begin({
               ...input,
@@ -911,6 +913,7 @@ export function mcpRoutes(ctx: RouterContext) {
               userId: context.actor.userId,
             });
           } catch (error) {
+            if (error instanceof ORPCError) throw error;
             if (error instanceof McpOAuthClientRequiredError) {
               await recordMcpServerHealth(
                 deps.prisma,
@@ -927,43 +930,31 @@ export function mcpRoutes(ctx: RouterContext) {
         }),
         complete: authed.mcp.oauth.complete.handler(async ({ context, input }) => {
           try {
-            // complete() consumes the session, so which server it belongs to is read first.
-            const session = deps.mcp
-              ? await deps.prisma.mcpOAuthSession
-                  .findFirst({
-                    where: {
-                      id: input.sessionId,
-                      spaceId: context.actor.spaceId,
-                      userId: context.actor.userId,
-                    },
-                    select: { serverId: true },
-                  })
-                  .catch(() => null)
-              : null;
-            await mcpOAuth.complete({
+            const { serverId, revision } = await mcpOAuth.complete({
               ...input,
               spaceId: context.actor.spaceId,
               userId: context.actor.userId,
             });
-            if (session) {
-              // The account is connected now: check the server so it shows ok/error.
-              void (async () => {
-                const server = await deps.prisma.mcpServer.findFirst({
-                  where: {
-                    id: session.serverId,
-                    ...availableInSpace(context.actor),
-                  },
-                });
-                if (server)
-                  await beginMcpProbe(
-                    server,
-                    context.actor,
-                    await mcpOAuth.summaryFor(server, context.actor),
-                  );
-              })().catch((error) =>
-                getLogger().error("mcp server probe after oauth failed", error),
-              );
-            }
+            // A check from before the sign-in would otherwise still read as failing. Only this
+            // sign-in's revision: an edit since then has its own health and its own check.
+            await recordMcpServerHealth(
+              deps.prisma,
+              serverId,
+              { status: "unknown", message: null },
+              revision,
+            );
+            // The account is connected now: check the server so it shows ok/error.
+            void (async () => {
+              const server = await deps.prisma.mcpServer.findFirst({
+                where: { id: serverId, revision, ...availableInSpace(context.actor) },
+              });
+              if (server)
+                await beginMcpProbe(
+                  server,
+                  context.actor,
+                  await mcpOAuth.summaryFor(server, context.actor),
+                );
+            })().catch((error) => getLogger().error("mcp server probe after oauth failed", error));
             return { ok: true as const };
           } catch (error) {
             throw new ORPCError("BAD_REQUEST", {
@@ -972,24 +963,20 @@ export function mcpRoutes(ctx: RouterContext) {
           }
         }),
         disconnect: authed.mcp.oauth.disconnect.handler(async ({ context, input }) => {
-          await mcpOAuth.disconnect({
+          const revision = await mcpOAuth.disconnect({
             ...input,
             spaceId: context.actor.spaceId,
             userId: context.actor.userId,
           });
           // A health check from before the disconnect would otherwise still read as connected.
-          const server = await deps.prisma.mcpServer.findFirst({
-            where: {
-              id: input.serverId,
-              ...availableInSpace(context.actor),
-            },
-            select: { id: true },
-          });
-          if (server)
-            await recordMcpServerHealth(deps.prisma, server.id, {
-              status: "unknown",
-              message: MCP_OAUTH_PENDING_MESSAGE,
-            });
+          // Only this disconnect's revision: a sign-in since then has its own health.
+          if (revision !== undefined)
+            await recordMcpServerHealth(
+              deps.prisma,
+              input.serverId,
+              { status: "unknown", message: MCP_OAUTH_PENDING_MESSAGE },
+              revision,
+            );
           return { ok: true as const };
         }),
       },

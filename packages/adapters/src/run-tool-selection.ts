@@ -22,6 +22,7 @@ export const READ_ONLY_AGENT_TOOLS = new Set([
   "list_fleet",
   "read_file",
   "read_history",
+  "read_email",
   "search_history",
   "request_takeover",
   "run_subagent",
@@ -34,11 +35,16 @@ export const READ_ONLY_AGENT_TOOLS = new Set([
   "skill_read",
   "web_search",
   "web_fetch",
+  "service_search",
   "browser_snapshot",
   "list_secrets",
   "cloud_agent_status",
   "purchase_status",
 ]);
+
+/** The bot's own inbox, offered only in its owner's runs outside groups and channels. */
+const EMAIL_INBOX_TOOL_NAMES = new Set(["read_email", "delete_email"]);
+const PAID_SERVICE_TOOL_NAMES = new Set(["service_search", "service_call"]);
 
 /** Offered only to a user who connected a wallet. */
 const PURCHASE_TOOL_NAMES = new Set(["request_purchase", "purchase_status", "paid_request"]);
@@ -74,6 +80,8 @@ export function selectBuiltinToolsForRun(options: {
   paymentWalletEnabled?: boolean;
   mediaImagesEnabled?: boolean;
   mediaVideoEnabled?: boolean;
+  /** The deployment configured paid data services. */
+  paidServicesEnabled?: boolean;
   messagingChannelRun: boolean;
   /** Hanging up is only offered to a turn the caller spoke on a live call. */
   voiceCall?: boolean;
@@ -86,9 +94,23 @@ export function selectBuiltinToolsForRun(options: {
   userComputer?: boolean;
   /** That desktop can look at and drive its apps. */
   userComputerScreen?: boolean;
+  /** The bot has an email address and this run is its owner's own, outside any group or channel. */
+  emailInbox?: boolean;
+  /** This server receives email and the bot has no address yet. */
+  emailClaimable?: boolean;
+  /** The inbox may be read and this server can send email. */
+  emailSend?: boolean;
 }) {
   const disabled = disabledBuiltinToolSet(options.disabledBuiltinTools);
   const ownerStartedRun = isOwnerStartedRun(options.trigger, Boolean(options.followUpFromUser));
+  // Claiming is offered only in the owner's own chat, so once the bot claims an address there it
+  // can read the mail that follows, such as a sign-up code, in the same run.
+  const emailClaimOffered =
+    Boolean(options.emailClaimable) &&
+    ownerStartedRun &&
+    !options.groupId &&
+    !options.messagingChannelRun;
+  const emailMailbox = Boolean(options.emailInbox) || emailClaimOffered;
   return selectCloudAgentTools(
     selectMemoryTools(
       filterBuiltinToolsForRun(
@@ -115,6 +137,9 @@ export function selectBuiltinToolsForRun(options: {
       (options.paymentWalletEnabled || !PURCHASE_TOOL_NAMES.has(tool.name)) &&
       (options.mediaImagesEnabled || tool.name !== "generate_image") &&
       (options.mediaVideoEnabled || tool.name !== "generate_video") &&
+      // People in a messaging channel are not the owner, whose credits these calls spend.
+      ((options.paidServicesEnabled && !options.messagingChannelRun) ||
+        !PAID_SERVICE_TOOL_NAMES.has(tool.name)) &&
       (options.ticketBoardEnabled ||
         (tool.name !== "board_tickets" && !tool.name.startsWith("ticket_"))) &&
       (!isBackgroundRunTrigger(options.trigger) ||
@@ -127,6 +152,9 @@ export function selectBuiltinToolsForRun(options: {
           "generate_video",
         ].includes(tool.name)) &&
       (options.voiceCall || tool.name !== "end_call") &&
+      (emailMailbox || !EMAIL_INBOX_TOOL_NAMES.has(tool.name)) &&
+      ((emailMailbox && options.emailSend) || tool.name !== "send_email") &&
+      (emailClaimOffered || tool.name !== "claim_email_address") &&
       (options.userComputer || tool.name !== "user_computer_shell") &&
       ((options.userComputer && options.userComputerScreen) ||
         !USER_COMPUTER_SCREEN_TOOLS.has(tool.name)) &&
