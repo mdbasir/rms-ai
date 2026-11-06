@@ -7166,6 +7166,10 @@ msgid "Transcript"
 msgstr "대화 기록"
 
 #: src/pages/VoiceSettingsOverlay.tsx
+msgid "Transcription API key"
+msgstr "전사 API 키"
+
+#: src/pages/VoiceSettingsOverlay.tsx
 msgid "Transcription model"
 msgstr ""
 
@@ -7176,6 +7180,10 @@ msgstr ""
 #: src/lib/dictation.ts
 msgid "Transcription response is too large."
 msgstr ""
+
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Transcription server URL"
+msgstr "전사 서버 URL"
 
 #: src/pages/ExternalConversationSettings.tsx
 msgid "Treat like a person"

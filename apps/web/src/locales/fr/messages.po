@@ -7166,6 +7166,10 @@ msgid "Transcript"
 msgstr "Transcription"
 
 #: src/pages/VoiceSettingsOverlay.tsx
+msgid "Transcription API key"
+msgstr "Clé API de transcription"
+
+#: src/pages/VoiceSettingsOverlay.tsx
 msgid "Transcription model"
 msgstr ""
 
@@ -7176,6 +7180,10 @@ msgstr ""
 #: src/lib/dictation.ts
 msgid "Transcription response is too large."
 msgstr ""
+
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Transcription server URL"
+msgstr "URL du serveur de transcription"
 
 #: src/pages/ExternalConversationSettings.tsx
 msgid "Treat like a person"

@@ -7166,6 +7166,10 @@ msgid "Transcript"
 msgstr "ट्रांसक्रिप्ट"
 
 #: src/pages/VoiceSettingsOverlay.tsx
+msgid "Transcription API key"
+msgstr "ट्रांसक्रिप्शन API कुंजी"
+
+#: src/pages/VoiceSettingsOverlay.tsx
 msgid "Transcription model"
 msgstr ""
 
@@ -7176,6 +7180,10 @@ msgstr ""
 #: src/lib/dictation.ts
 msgid "Transcription response is too large."
 msgstr ""
+
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Transcription server URL"
+msgstr "ट्रांसक्रिप्शन सर्वर URL"
 
 #: src/pages/ExternalConversationSettings.tsx
 msgid "Treat like a person"
