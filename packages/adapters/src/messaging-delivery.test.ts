@@ -314,8 +314,13 @@ describe("deliverMessagingOutbound", () => {
     expect(deps.prisma.messagingIdentity.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { outboundSinceInbound: { increment: 1 } } }),
     );
+    // A run answered while this mirror ran is working again and stays unmirrored.
     expect(deps.prisma.run.updateMany).toHaveBeenCalledWith({
-      where: { id: "run-1", trigger: "messaging" },
+      where: {
+        id: "run-1",
+        trigger: "messaging",
+        status: { notIn: ["queued", "leased", "running"] },
+      },
       data: { messagingMirroredAt: expect.any(Date) },
     });
   });
@@ -342,6 +347,58 @@ describe("deliverMessagingOutbound", () => {
 
   const sentBodies = (deps: ReturnType<typeof createDeps>) =>
     (deps.sendToThread.mock.calls as unknown as [{ body: string }][]).map(([input]) => input.body);
+
+  it("sends a pending question as text with numbered options, but never an approval or a secret", async () => {
+    const deps = createDeps({
+      messages: [
+        {
+          id: "m-1",
+          blocks: [
+            {
+              kind: "ask",
+              text: "Send this reply?",
+              detail: "Thanks, see you Monday.",
+              detailFormat: "text",
+              status: "pending",
+              actions: [
+                { id: "choice-1", label: "Send it" },
+                { id: "choice-2", label: "Make it shorter" },
+              ],
+            },
+          ],
+        },
+        {
+          id: "m-2",
+          blocks: [
+            {
+              kind: "ask",
+              text: "Send the email?",
+              approvalEffectId: "effect-1",
+              status: "pending",
+              actions: [
+                { id: "allow", label: "Allow" },
+                { id: "deny", label: "Deny" },
+              ],
+            },
+          ],
+        },
+        {
+          id: "m-3",
+          blocks: [{ kind: "ask", text: "Your API key?", input: "secret", status: "pending" }],
+        },
+        {
+          id: "m-4",
+          blocks: [{ kind: "ask", text: "Which city?", status: "answered", answer: "Paris" }],
+        },
+      ],
+    });
+    await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
+
+    expect(sentBodies(deps)).toEqual([
+      "Send this reply?\n\nThanks, see you Monday.\n\n1. Send it\n2. Make it shorter",
+    ]);
+    expect(deps.rows).toEqual([expect.objectContaining({ sourceMessageId: "m-1" })]);
+  });
 
   it("sends a page card's title when the reply does not name the page, and only once when it does", async () => {
     const card = {
