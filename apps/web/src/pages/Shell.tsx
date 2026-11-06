@@ -177,6 +177,7 @@ function SpaceShell() {
     initialLoadFailed,
     bootstrapMe,
     setBootstrapMe,
+    noteTimezoneChoice,
     refreshBots,
   } = roster;
   const { collapsedSidebarSections, toggleSidebarSection } = useSidebarExpansion(userId);
@@ -415,7 +416,6 @@ function SpaceShell() {
   }
   const openSpaceChatRef = useRef<(spaceId: string, path: string) => void>(() => {});
   useSpaceBootstrap({
-    rpc,
     roster,
     thread,
     commitComputer,
@@ -1416,6 +1416,7 @@ function SpaceShell() {
           refetchSession={() => session.refetch({ query: { disableCookieCache: true } })}
           bootstrapMe={bootstrapMe}
           setBootstrapMe={setBootstrapMe}
+          noteTimezoneChoice={noteTimezoneChoice}
           messagingEnabled={messagingSurfaceEnabled}
           memoryConfig={memoryProviderConfig}
           peerConversation={peerConversation}
